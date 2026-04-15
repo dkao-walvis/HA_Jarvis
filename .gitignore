@@ -1,32 +1,23 @@
-# Secrets
-.env
-.env.local
-*.key
-*.pem
-
-# Databases & state
-*.db
-*.sqlite
-*.sqlite3
-
-# Python venvs
-.codex-venv/
-venv/
+# HA_Jarvis gitignore
+*.log
+*.log.*
 __pycache__/
 *.pyc
-
-# Node
-node_modules/
-npm-debug.log*
-
-# Logs
-*.log
-
-# macOS metadata
-.DS_Store
-._*
-
-# Cache
-.cache/
+*.pyo
+.venv/
+venv/
 tmp/
-flames/.flameconnect_tokens.json
+listener/*.log
+listener/__pycache__/
+morning_reports/*.md
+morning_reports/*.json
+flames/*.mp4
+flames/*.jpg
+# Secrets
+.env
+.env.*
+api_keys.db
+config/secrets.yaml
+# OS
+.DS_Store
+Thumbs.db
