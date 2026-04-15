@@ -12,7 +12,9 @@ import json
 import logging
 import os
 import random
+import re
 import requests
+import urllib.request
 import pymysql
 from datetime import date
 
@@ -270,20 +272,183 @@ def stop_music(speaker: str, api_key: str) -> bool:
 
 # ── Shared runners ────────────────────────────────────────────────────────────
 
-def run_music_routine(db_pass: str, room: str, context: str, fallback_query: str, force_refresh: bool = False) -> bool:
-    conn    = get_db(db_pass)
-    speaker = get_speaker(conn, room)
-    api_key = get_api_key(conn)
+def run_music_routine(db_pass, room, context, fallback_query, trigger_source='routine'):
+    """
+    Pick a seed from music_seeds for `context`, filter out seeds played in the
+    last 7 days (relax to 3, 1, any if exhausted), weighted random pick, ask
+    Claude to refine it into a good query string, POST to api.php to play.
+    Log the play to music_history.
+    """
+    import mysql.connector
 
-    if not speaker:
-        log.error(f"No '{room}' speaker found in whitelist")
-        return False
-    if not api_key:
-        log.error("No active API key found")
-        return False
+    DB = dict(host='localhost', user='admin', password=db_pass, database='jarvis_brain')
+    conn = mysql.connector.connect(**DB)
+    cur  = conn.cursor(dictionary=True)
 
-    query = get_or_generate_query(conn, context, fallback_query, force_refresh=force_refresh)
-    return play_music(speaker, query, api_key)
+    # Speaker friendly-name mapping
+    SPEAKER_BY_ROOM = {
+        'office':    'Darren office speaker',
+        'kitchen':   'Kitchen speaker',
+        'game_room': 'Game room speaker',
+    }
+    speaker = SPEAKER_BY_ROOM.get(room, room)
+
+    # Fetch enabled seeds for this context
+    cur.execute("SELECT * FROM music_seeds WHERE context=%s AND enabled=1", (context,))
+    seeds = cur.fetchall()
+    if not seeds:
+        _fallback_play(speaker, fallback_query, conn, cur, context, trigger_source, db_pass)
+        conn.close()
+        return
+
+    # Filter by cooldown — try 7d, then 3d, then 1d, then any
+    eligible = []
+    for days in (7, 3, 1, 0):
+        cur.execute("""
+            SELECT DISTINCT seed_id FROM music_history
+            WHERE context=%s AND seed_id IS NOT NULL AND ts >= NOW() - INTERVAL %s DAY
+        """, (context, days))
+        recent = {r['seed_id'] for r in cur.fetchall()}
+        eligible = [s for s in seeds if s['id'] not in recent]
+        if eligible or days == 0:
+            break
+    if not eligible:
+        eligible = seeds  # last resort
+
+    # Weighted random pick
+    total = sum(s['weight'] for s in eligible) or 1
+    roll = random.uniform(0, total)
+    acc = 0
+    chosen = eligible[0]
+    for s in eligible:
+        acc += s['weight']
+        if roll <= acc:
+            chosen = s
+            break
+
+    # Optional Claude refinement
+    query = _ask_claude_refine_seed(chosen['seed_text'], chosen.get('genre'), context) or chosen['seed_text']
+
+    # POST to api.php
+    api_key = _load_ha_jarvis_api_key(db_pass)
+    payload = json.dumps({
+        'action':    'play',
+        'entity_id': speaker,
+        'query':     query,
+        'api_key':   api_key,
+    }).encode()
+    req = urllib.request.Request(
+        'http://localhost/HA_Jarvis/api.php',
+        data=payload,
+        headers={'Content-Type': 'application/json', 'X-API-Key': api_key},
+    )
+    try:
+        urllib.request.urlopen(req, timeout=20).read()
+    except Exception as e:
+        _log_learning(cur, 'weight_change', context, chosen['id'], chosen['seed_text'],
+                      None, None, f'play failed: {e}')
+        conn.commit(); conn.close()
+        return
+
+    # Log history + bump counters
+    cur.execute("""
+        INSERT INTO music_history (context, seed_id, seed_text, speaker, trigger_source, query_sent)
+        VALUES (%s, %s, %s, %s, %s, %s)
+    """, (context, chosen['id'], chosen['seed_text'], speaker, trigger_source, query))
+    cur.execute("""
+        UPDATE music_seeds SET last_played_at=NOW(), play_count=play_count+1 WHERE id=%s
+    """, (chosen['id'],))
+    conn.commit()
+    conn.close()
+    return {'seed': chosen['seed_text'], 'query': query, 'speaker': speaker}
+
+
+def _ask_claude_refine_seed(seed_text, genre, context):
+    """Ask local Claude for a YouTube search query that produces a long playlist/radio for this seed.
+    Return the query string, or None on any error."""
+    try:
+        prompt = (
+            f"Seed: {seed_text}\n"
+            f"Genre: {genre or 'unspecified'}\n"
+            f"Context: {context}\n\n"
+            f"Emit a single YouTube search query that returns a LONG playlist or radio "
+            f"mix of this seed. Return only the query, no explanation, no quotes."
+        )
+        system = (
+            "You are a music curator. Generate concise YouTube search queries "
+            "that return long playlist/radio variants of the seed. One line only."
+        )
+        body = json.dumps({'prompt': prompt, 'context': system}).encode()
+        req = urllib.request.Request(
+            'http://100.69.36.45:3000/ask_claude',
+            data=body,
+            headers={'Content-Type': 'application/json'},
+        )
+        resp = urllib.request.urlopen(req, timeout=15).read()
+        reply = json.loads(resp).get('reply', '').strip()
+        return reply or None
+    except Exception:
+        return None
+
+
+def _fallback_play(speaker, fallback_query, conn, cur, context, trigger_source, db_pass=None):
+    """No seeds available — play the fallback query directly."""
+    api_key = _load_ha_jarvis_api_key(db_pass)
+    payload = json.dumps({
+        'action': 'play', 'entity_id': speaker,
+        'query': fallback_query, 'api_key': api_key,
+    }).encode()
+    req = urllib.request.Request(
+        'http://localhost/HA_Jarvis/api.php',
+        data=payload,
+        headers={'Content-Type': 'application/json', 'X-API-Key': api_key},
+    )
+    try:
+        urllib.request.urlopen(req, timeout=20).read()
+    except Exception:
+        pass
+    cur.execute("""
+        INSERT INTO music_history (context, seed_id, seed_text, speaker, trigger_source, query_sent)
+        VALUES (%s, NULL, %s, %s, %s, %s)
+    """, (context, fallback_query, speaker, trigger_source, fallback_query))
+    conn.commit()
+
+
+def _log_learning(cur, action, context, seed_id, seed_text, old, new, reason):
+    cur.execute("""
+        INSERT INTO music_learning_log (action, context, seed_id, seed_text, old_value, new_value, reason)
+        VALUES (%s, %s, %s, %s, %s, %s, %s)
+    """, (action, context, seed_id, seed_text, old, new, reason))
+
+
+def _load_ha_jarvis_api_key(db_pass=None):
+    """Read API key from env, or from jarvis_ha api_keys table via pymysql."""
+    k = os.environ.get('HA_JARVIS_API_KEY')
+    if k:
+        return k
+    # Fall back to reading from the jarvis_ha DB (same pattern as get_api_key helper)
+    try:
+        import pymysql as _pymysql
+        # db_pass not passed in from _ask_claude_refine_seed path; read from env or load_env
+        pw = db_pass or os.environ.get('DB_PASS', '')
+        if not pw:
+            env = load_env(FLIPFLOP_ENV)
+            pw = env.get('DB_PASS', '')
+        conn = _pymysql.connect(
+            host='localhost', db='jarvis_ha', user='admin', password=pw,
+            charset='utf8mb4', autocommit=True,
+            cursorclass=_pymysql.cursors.DictCursor
+        )
+        with conn.cursor() as cur:
+            cur.execute("SELECT api_key FROM api_keys WHERE enabled=1 AND label LIKE '%arvis%' LIMIT 1")
+            row = cur.fetchone()
+            if not row:
+                cur.execute("SELECT api_key FROM api_keys WHERE enabled=1 LIMIT 1")
+                row = cur.fetchone()
+        conn.close()
+        return row['api_key'] if row else ''
+    except Exception:
+        return ''
 
 
 def run_stop_routine(db_pass: str, room: str) -> bool:
