@@ -52,10 +52,10 @@ Structure:
 - School commute: if a "School commute" block is provided, 1 sentence summarizing the Waze time to Ashbury and the leave-by target. If no such block is present, skip this section entirely.
 - Household: if a "Household Anomalies" block is provided, include 1-3 bullets for the most important items. Say "quiet overnight" if the block says none. Skip if the block is missing entirely.
 - Agenda: always include. If the agenda data contains bullet lines, list them verbatim. If it literally says "(no events today)", write exactly: "Agenda: Nothing scheduled today." If it says "(unavailable: ...)", write exactly: "Agenda: Calendar unavailable."
-- News sections in order: Ottawa, Canada, World, Tech, Business. Highlight the most interesting story or two per section. Skip a section if it has no relevant stories.
-- End with a one-line motivational note for the day.
+- News sections: ALWAYS include all five headers in this exact order — Ottawa, Canada, World, Tech, Business. Under each header, summarize the 1-2 most interesting stories from the provided data. If a section has no stories in the data, keep the header and write "(no headlines today)" underneath — do NOT drop the section.
+- End with a one-line motivational note for the day. Use the correct day name from the "Today" line at the top of the data — never guess the day.
 
-Keep it under 260 words total. Warm, conversational tone, second person ("your", "you") when addressing Darren. Do not refer to Darren in the third person. Do not include emoji prefixes unless they add clarity.`;
+Keep it under 280 words total. Warm, conversational tone, second person ("your", "you") when addressing Darren. Do not refer to Darren in the third person. Do not include emoji prefixes unless they add clarity. Do NOT add a greeting like "Here's your [day] briefing" — the script adds the date header above your output.`;
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 function get(url, headers = {}) {
@@ -589,16 +589,19 @@ async function main() {
             fetchHouseholdAnomalies(),
         ]);
 
-        const sections = [weather, gasPrice, commute, anomalies, agenda, canada, ottawa, world, tech, business, guardian].filter(Boolean);
-        const combined = sections.join('\n\n');
-        const briefing = await askClaude(combined, SYSTEM_PROMPT);
-
         const dateHeader = new Intl.DateTimeFormat('en-US', {
             timeZone: REPORT_TIMEZONE,
             weekday: 'long',
             month: 'long',
             day: 'numeric',
+            year: 'numeric',
         }).format(new Date());
+        const todayLine = `Today: ${dateHeader}`;
+
+        const sections = [todayLine, weather, gasPrice, commute, anomalies, agenda, canada, ottawa, world, tech, business, guardian].filter(Boolean);
+        const combined = sections.join('\n\n');
+        const briefing = await askClaude(combined, SYSTEM_PROMPT);
+
         const finalMessage = `*Today is ${dateHeader}*\n\n${briefing}`;
 
         log('Briefing ready:\n' + finalMessage);
