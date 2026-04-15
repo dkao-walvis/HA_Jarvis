@@ -84,10 +84,26 @@ def ensure_cache_table(conn: pymysql.Connection) -> None:
         """)
     log.info("entity_cache table ready")
 
+_whitelist_cache: set = set()
+_whitelist_cache_ts: float = 0.0
+WHITELIST_TTL_SECONDS = 60
+
 def get_whitelisted(conn: pymysql.Connection) -> set:
+    """Return the enabled-entity whitelist, cached for WHITELIST_TTL_SECONDS.
+
+    Previously hit MySQL on EVERY state_changed event, which at ~100 events/sec
+    during a Frigate/HA flap storm meant ~100 queries/sec just for this lookup.
+    A 60s TTL cache is plenty fresh for the automation logic that consumes it.
+    """
+    global _whitelist_cache, _whitelist_cache_ts
+    now = time.time()
+    if _whitelist_cache and (now - _whitelist_cache_ts) < WHITELIST_TTL_SECONDS:
+        return _whitelist_cache
     with conn.cursor() as cur:
         cur.execute("SELECT entity_id FROM entities WHERE enabled = 1")
-        return {row["entity_id"] for row in cur.fetchall()}
+        _whitelist_cache = {row["entity_id"] for row in cur.fetchall()}
+    _whitelist_cache_ts = now
+    return _whitelist_cache
 
 def upsert_state(conn: pymysql.Connection, entity_id: str, state: str,
                  attributes: dict, last_changed: str) -> None:
@@ -168,8 +184,17 @@ async def listen(ha_token: str, db_pass: str) -> None:  # noqa: C901
                 attributes    = new_state.get("attributes", {})
                 last_changed  = new_state.get("last_changed", "")
 
+                # Skip 'unavailable' transitions entirely. When an integration
+                # (e.g. Frigate) flaps, every entity cycles available ↔ unavailable
+                # at high rate; upserting every flap burns MySQL + log disk for
+                # no automation value, since the last-known good state already
+                # lives in entity_cache. Real recoveries (unavailable → real value)
+                # still flow through normally.
+                if state == "unavailable":
+                    continue
+
                 upsert_state(conn, entity_id, state, attributes, last_changed)
-                log.info(f"Cached {entity_id} = {state} (was {old_state_val})")
+                log.debug(f"Cached {entity_id} = {state} (was {old_state_val})")
 
                 # ── Morning routine: alarm disarmed ──────────────────────────────
                 if (
