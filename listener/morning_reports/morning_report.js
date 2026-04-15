@@ -57,6 +57,63 @@ Structure:
 
 Keep it under 280 words total. Warm, conversational tone, second person ("your", "you") when addressing Darren. Do not refer to Darren in the third person. Do not include emoji prefixes unless they add clarity. Do NOT add a greeting like "Here's your [day] briefing" — the script adds the date header above your output.`;
 
+// ── Briefing DB helpers ───────────────────────────────────────────────────────
+async function logBriefing(briefingDate, fullText, sectionsJson) {
+    const mysql = require('mysql2/promise');
+    const conn = await mysql.createConnection({
+        host: brainEnv.DB_HOST || 'localhost',
+        user: brainEnv.DB_USER,
+        password: brainEnv.DB_PASS,
+        database: brainEnv.DB_NAME || 'jarvis_brain',
+    });
+    try {
+        const [result] = await conn.execute(
+            'INSERT INTO briefing_log (briefing_date, full_text, sections_json) VALUES (?, ?, ?)',
+            [briefingDate, fullText, JSON.stringify(sectionsJson)]
+        );
+        log(`Briefing logged: id=${result.insertId}, sections=${Object.keys(sectionsJson).length}`);
+        return result.insertId;
+    } finally {
+        await conn.end();
+    }
+}
+
+async function fetchBriefingPreferences() {
+    const mysql = require('mysql2/promise');
+    const conn = await mysql.createConnection({
+        host: brainEnv.DB_HOST || 'localhost',
+        user: brainEnv.DB_USER,
+        password: brainEnv.DB_PASS,
+        database: brainEnv.DB_NAME || 'jarvis_brain',
+    });
+    try {
+        const [rows] = await conn.execute(
+            `SELECT bf.section_key, bf.reaction, COUNT(*) AS cnt
+             FROM briefing_feedback bf
+             JOIN briefing_log bl ON bf.briefing_id = bl.id
+             WHERE bl.briefing_date >= CURDATE() - INTERVAL 14 DAY
+             GROUP BY bf.section_key, bf.reaction
+             ORDER BY bf.section_key, cnt DESC`
+        );
+        if (!rows.length) return null;
+
+        // Build human-readable preference block
+        const bySection = {};
+        for (const r of rows) {
+            if (!bySection[r.section_key]) bySection[r.section_key] = [];
+            bySection[r.section_key].push(`${r.reaction} (×${r.cnt})`);
+        }
+        const lines = ['User briefing preferences (last 14 days of feedback):'];
+        for (const [section, reactions] of Object.entries(bySection)) {
+            lines.push(`- ${section}: ${reactions.join(', ')}`);
+        }
+        lines.push('Adjust tone/depth for sections marked "noise" (less detail) or "love" (more detail).');
+        return lines.join('\n');
+    } finally {
+        await conn.end();
+    }
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 function get(url, headers = {}) {
     return new Promise((resolve, reject) => {
@@ -600,7 +657,34 @@ async function main() {
 
         const sections = [todayLine, weather, gasPrice, commute, anomalies, agenda, canada, ottawa, world, tech, business, guardian].filter(Boolean);
         const combined = sections.join('\n\n');
-        const briefing = await askClaude(combined, SYSTEM_PROMPT);
+
+        // Fetch 14-day feedback preferences and inject into system prompt
+        let prefs = null;
+        try {
+            prefs = await fetchBriefingPreferences();
+        } catch (err) {
+            log(`fetchBriefingPreferences failed (non-fatal): ${err.message}`);
+        }
+        const promptToUse = prefs ? `${SYSTEM_PROMPT}\n\n${prefs}` : SYSTEM_PROMPT;
+        if (prefs) log('Preference block injected into system prompt.');
+
+        const briefing = await askClaude(combined, promptToUse);
+
+        // Parse briefing into sections and log to briefing_log
+        const briefingDate = startOfTodayInTimezone(REPORT_TIMEZONE);
+        const sectionRegex = /(?:^|\n)\*?\*?(weather|gas|school commute|household|agenda|ottawa|canada|world|tech|business)\*?\*?\s*[:\-\u2014]?\s*([\s\S]*?)(?=\n\*?\*?(?:weather|gas|school commute|household|agenda|ottawa|canada|world|tech|business)\b|$)/gi;
+        const parsedSections = {};
+        let match;
+        while ((match = sectionRegex.exec(briefing)) !== null) {
+            const key = match[1].toLowerCase().replace(/\s+/g, '_');
+            parsedSections[key] = match[2].trim();
+        }
+        log(`Parsed ${Object.keys(parsedSections).length} sections: ${Object.keys(parsedSections).join(', ')}`);
+        try {
+            await logBriefing(briefingDate, briefing, parsedSections);
+        } catch (err) {
+            log(`logBriefing failed (non-fatal): ${err.message}`);
+        }
 
         const finalMessage = `*Today is ${dateHeader}*\n\n${briefing}`;
 
