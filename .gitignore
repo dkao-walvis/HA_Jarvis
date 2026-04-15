@@ -26,3 +26,8 @@ Thumbs.db
 .DS_Store
 # Node
 node_modules/
+# Tokens / auth artifacts
+*tokens*.json
+*secret*.json
+*.tokens
+flames/.flameconnect_tokens.json
