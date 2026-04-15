@@ -180,7 +180,7 @@ switch ($action) {
             $prev = $pfStmt->fetch(PDO::FETCH_ASSOC);
             if ($prev && $prev['feedback'] === null) {
                 $source = $body['trigger_source'] ?? $_SERVER['HTTP_X_TRIGGER_SOURCE'] ?? 'user';
-                $automation_sources = ['dkinoffice','dinner_time','game_room_light','routine','smoke','manual-test'];
+                $automation_sources = ['dkinoffice','dinner_time','game_room_light','routine','smoke','manual-test','legacy_automation'];
                 if (!in_array($source, $automation_sources, true)) {
                     $brainDb->prepare("UPDATE music_history SET feedback='auto_dislike', feedback_at=NOW(), weight_delta=-5 WHERE id=?")
                        ->execute([$prev['id']]);
