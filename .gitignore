@@ -31,3 +31,8 @@ node_modules/
 *secret*.json
 *.tokens
 flames/.flameconnect_tokens.json
+# Python virtualenvs (any name)
+.codex-venv/
+*-venv/
+**/venv/
+**/.venv/
