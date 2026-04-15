@@ -165,6 +165,39 @@ switch ($action) {
             respond(502, 'error', 'Could not resolve audio: ' . $ytdlp['message']);
         }
 
+        // Passive feedback: if the same speaker just played something from music_history < 5min ago,
+        // and this request didn't come from a routine script, flag the previous row as auto_dislike.
+        try {
+            $brainDb = new PDO('mysql:host=localhost;dbname=jarvis_brain;charset=utf8mb4', 'admin', 'StrongPassword123!');
+            $brainDb->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+            $pfStmt = $brainDb->prepare("
+                SELECT id, seed_id, weight_delta, feedback
+                FROM music_history
+                WHERE LOWER(speaker) = LOWER(?) AND ts >= NOW() - INTERVAL 5 MINUTE
+                ORDER BY id DESC LIMIT 1
+            ");
+            $pfStmt->execute([$entity['friendly_name']]);
+            $prev = $pfStmt->fetch(PDO::FETCH_ASSOC);
+            if ($prev && $prev['feedback'] === null) {
+                $source = $body['trigger_source'] ?? $_SERVER['HTTP_X_TRIGGER_SOURCE'] ?? 'user';
+                $automation_sources = ['dkinoffice','dinner_time','game_room_light','routine','smoke','manual-test'];
+                if (!in_array($source, $automation_sources, true)) {
+                    $brainDb->prepare("UPDATE music_history SET feedback='auto_dislike', feedback_at=NOW(), weight_delta=-5 WHERE id=?")
+                       ->execute([$prev['id']]);
+                    if ($prev['seed_id']) {
+                        $brainDb->prepare("UPDATE music_seeds SET weight=GREATEST(1,weight-5), dislike_count=dislike_count+1 WHERE id=?")
+                           ->execute([$prev['seed_id']]);
+                        $brainDb->prepare("INSERT INTO music_learning_log (action, context, seed_id, seed_text, old_value, new_value, reason)
+                                          SELECT 'weight_change', context, ?, seed_text, CAST(weight+5 AS CHAR), CAST(weight AS CHAR), 'auto_dislike: user override within 5min'
+                                          FROM music_seeds WHERE id=?")
+                           ->execute([$prev['seed_id'], $prev['seed_id']]);
+                    }
+                }
+            }
+        } catch (Exception $e) {
+            error_log("music passive feedback error: " . $e->getMessage());
+        }
+
         // Cast to HA media player
         $payload = [
             'entity_id'          => $entity_id,
