@@ -117,7 +117,21 @@ function _ask_claude_refine(string $seed_text, ?string $genre, string $context):
     if (!$resp) return null;
     $data  = json_decode($resp, true);
     $reply = trim($data['reply'] ?? '');
-    return $reply ?: null;
+    if (!_is_sane_query($reply)) return null;
+    return $reply;
+}
+
+/**
+ * Reject Claude replies that look like upstream errors or non-query content.
+ * Real queries are short, plain text, no JSON, no error keywords.
+ */
+function _is_sane_query(string $r): bool {
+    if ($r === '') return false;
+    if (strlen($r) > 200) return false;            // queries should be short
+    if (strpos($r, '{') !== false) return false;   // any JSON-looking content = not a query
+    if (preg_match('/\b(api error|http \d{3}|internal server error|rate limit|status\.claude\.com|503|502|429)\b/i', $r)) return false;
+    if (preg_match('/^\s*error\b/i', $r)) return false;
+    return true;
 }
 
 function _claude_fallback(string $fallback): string {

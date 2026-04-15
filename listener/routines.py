@@ -386,9 +386,27 @@ def _ask_claude_refine_seed(seed_text, genre, context):
         )
         resp = urllib.request.urlopen(req, timeout=15).read()
         reply = json.loads(resp).get('reply', '').strip()
-        return reply or None
+        if not _is_sane_query(reply):
+            return None
+        return reply
     except Exception:
         return None
+
+
+def _is_sane_query(r):
+    """Reject Claude replies that look like upstream errors or non-query content."""
+    if not r:
+        return False
+    if len(r) > 200:
+        return False
+    if '{' in r:
+        return False
+    import re as _re
+    if _re.search(r'\b(api error|http \d{3}|internal server error|rate limit|status\.claude\.com|503|502|429)\b', r, _re.I):
+        return False
+    if _re.match(r'\s*error\b', r, _re.I):
+        return False
+    return True
 
 
 def _fallback_play(speaker, fallback_query, conn, cur, context, trigger_source, db_pass=None):
