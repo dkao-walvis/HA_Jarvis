@@ -1,0 +1,32 @@
+# Secrets
+.env
+.env.local
+*.key
+*.pem
+
+# Databases & state
+*.db
+*.sqlite
+*.sqlite3
+
+# Python venvs
+.codex-venv/
+venv/
+__pycache__/
+*.pyc
+
+# Node
+node_modules/
+npm-debug.log*
+
+# Logs
+*.log
+
+# macOS metadata
+.DS_Store
+._*
+
+# Cache
+.cache/
+tmp/
+flames/.flameconnect_tokens.json

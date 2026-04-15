@@ -1,0 +1,4 @@
+websockets
+pymysql
+requests
+python-dotenv

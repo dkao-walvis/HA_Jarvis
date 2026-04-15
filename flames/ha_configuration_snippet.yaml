@@ -1,0 +1,54 @@
+# ── Flames Connect — Fireplace REST commands ─────────────────────────────────
+# Paste this into your configuration.yaml on the HA machine, then restart HA.
+# Friday server IP: 100.69.36.45
+
+rest_command:
+  fireplace_on:
+    url: "http://100.69.36.45/HA_Jarvis/flames/webhook.php?cmd=on&token=flames_webhook_2026_friday"
+    method: GET
+
+  fireplace_off:
+    url: "http://100.69.36.45/HA_Jarvis/flames/webhook.php?cmd=off&token=flames_webhook_2026_friday"
+    method: GET
+
+  fireplace_status:
+    url: "http://100.69.36.45/HA_Jarvis/flames/webhook.php?cmd=status&token=flames_webhook_2026_friday"
+    method: GET
+
+# ── Fireplace switch template ──────────────────────────────────────────────────
+# Creates a real switch entity: switch.fireplace_living_room
+# State is polled every 30s via the status endpoint.
+
+template:
+  - sensor:
+      - name: "Fireplace Raw State"
+        unique_id: fireplace_raw_state
+        state: >
+          {{ states('input_boolean.fireplace_state') }}
+        scan_interval: 30
+
+switch:
+  - platform: template
+    switches:
+      fireplace_living_room:
+        friendly_name: "Living Room Fireplace"
+        value_template: "{{ is_state('input_boolean.fireplace_state', 'on') }}"
+        turn_on:
+          - service: rest_command.fireplace_on
+          - service: input_boolean.turn_on
+            target:
+              entity_id: input_boolean.fireplace_state
+        turn_off:
+          - service: rest_command.fireplace_off
+          - service: input_boolean.turn_off
+            target:
+              entity_id: input_boolean.fireplace_state
+
+# ── Input boolean to track state ──────────────────────────────────────────────
+# HA can't poll the fireplace state directly, so we track it locally.
+# Add this to your configuration.yaml too:
+
+input_boolean:
+  fireplace_state:
+    name: Fireplace State Tracker
+    initial: off

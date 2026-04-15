@@ -1,0 +1,15 @@
+[Unit]
+Description=HA Jarvis yt-dlp Audio Service
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/var/www/html/HA_Jarvis/listener
+ExecStart=/usr/bin/python3 /var/www/html/HA_Jarvis/listener/ytdlp_service.py
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

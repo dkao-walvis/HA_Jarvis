@@ -1,0 +1,10 @@
+{
+  "name": "morning-report",
+  "version": "1.0.0",
+  "description": "HA_Jarvis morning briefing generator",
+  "main": "morning_report.js",
+  "private": true,
+  "dependencies": {
+    "mysql2": "^3.11.0"
+  }
+}

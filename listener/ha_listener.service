@@ -1,0 +1,15 @@
+[Unit]
+Description=HA Jarvis WebSocket Listener
+After=network.target mysql.service
+
+[Service]
+Type=simple
+WorkingDirectory=/var/www/html/HA_Jarvis/listener
+ExecStart=/usr/bin/python3 /var/www/html/HA_Jarvis/listener/ha_listener.py
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
