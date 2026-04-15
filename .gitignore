@@ -21,3 +21,8 @@ config/secrets.yaml
 # OS
 .DS_Store
 Thumbs.db
+# macOS AppleDouble metadata
+._*
+.DS_Store
+# Node
+node_modules/
