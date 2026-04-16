@@ -52,7 +52,7 @@ Structure:
 - School commute: if a "School commute" block is provided, 1 sentence summarizing the Waze time to Ashbury and the leave-by target. If no such block is present, skip this section entirely.
 - Household: if a "Household Anomalies" block is provided, include 1-3 bullets for the most important items. Say "quiet overnight" if the block says none. Skip if the block is missing entirely.
 - Agenda: always include. If the agenda data contains bullet lines, list them verbatim. If it literally says "(no events today)", write exactly: "Agenda: Nothing scheduled today." If it says "(unavailable: ...)", write exactly: "Agenda: Calendar unavailable."
-- News sections: ALWAYS include all five headers in this exact order — Ottawa, Canada, World, Tech, Business. Under each header, summarize the 1-2 most interesting stories from the provided data. If a section has no stories in the data, keep the header and write "(no headlines today)" underneath — do NOT drop the section.
+- News sections: ALWAYS include all eight headers in this exact order — Ottawa, Canada, World, Tech, AI, Business, Markets. Under each header, summarize the 1-2 most interesting stories from the provided data. If a section has no stories in the data, keep the header and write "(no headlines today)" underneath — do NOT drop the section. For Markets, summarize the key numbers (indices, CAD/USD rate) in a compact format.
 - End with a one-line motivational note for the day. Use the correct day name from the "Today" line at the top of the data — never guess the day.
 
 Keep it under 280 words total. Warm, conversational tone, second person ("your", "you") when addressing Darren. Do not refer to Darren in the third person. Do not include emoji prefixes unless they add clarity. Do NOT add a greeting like "Here's your [day] briefing" — the script adds the date header above your output.`;
@@ -577,7 +577,68 @@ async function fetchOttawaGasPrice() {
     return lines.join('\n') + '\n';
 }
 
-// ── Fetch GNews ───────────────────────────────────────────────────────────────
+// ── Fetch RSS ────────────────────────────────────────────────────────────────
+function parseRssItems(xml, max = 5) {
+    const items = [];
+    const re = /<item[\s>]([\s\S]*?)<\/item>/gi;
+    let m;
+    while ((m = re.exec(xml)) !== null && items.length < max) {
+        const block = m[1];
+        const title = (block.match(/<title[^>]*>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?<\/title/) || [])[1] || '';
+        const desc  = (block.match(/<description[^>]*>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?<\/description/) || [])[1] || '';
+        if (title) items.push({ title: title.replace(/<[^>]+>/g,'').trim(), desc: desc.replace(/<[^>]+>/g,'').trim() });
+    }
+    return items;
+}
+
+async function fetchRSS(label, url) {
+    log(`Fetching RSS: ${label}...`);
+    try {
+        const raw = await get(url);
+        const items = parseRssItems(raw, 5);
+        if (!items.length) return `${label}:\n(no articles)\n`;
+        const lines = items.map(a => `- ${a.title}\n  ${(a.desc || '').slice(0, 150)}`);
+        return `${label}:\n${lines.join('\n')}\n`;
+    } catch (e) {
+        log(`RSS ${label} failed: ${e.message}`);
+        return `${label}:\n(unavailable)\n`;
+    }
+}
+
+// ── Fetch Markets (exchange rate + market news) ──────────────────────────────
+async function fetchMarkets() {
+    log('Fetching market data...');
+    try {
+        const results = [];
+
+        // CAD/USD exchange rate via open.er-api.com (free, no key)
+        try {
+            const fxRaw = await get('https://open.er-api.com/v6/latest/CAD');
+            const fx = parseJson('FX', fxRaw);
+            if (fx.rates && fx.rates.USD) {
+                results.push(`CAD/USD: 1 CAD = ${fx.rates.USD.toFixed(4)} USD (1 USD = ${(1/fx.rates.USD).toFixed(4)} CAD)`);
+            }
+        } catch (e) { log(`FX fetch failed: ${e.message}`); }
+
+        // Market headlines from CNBC Finance RSS (includes index movements in headlines)
+        try {
+            const raw = await get('https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=100003114');
+            const items = parseRssItems(raw, 5);
+            if (items.length) {
+                results.push('');
+                items.forEach(a => results.push(`- ${a.title}`));
+            }
+        } catch (e) { log(`CNBC markets RSS failed: ${e.message}`); }
+
+        if (!results.length) return 'Markets:\n(unavailable)\n';
+        return `Markets:\n${results.join('\n')}\n`;
+    } catch (e) {
+        log(`fetchMarkets failed: ${e.message}`);
+        return 'Markets:\n(unavailable)\n';
+    }
+}
+
+// ── Fetch GNews (fallback, single category) ──────────────────────────────────
 async function fetchGNews(label, url) {
     log(`Fetching GNews: ${label}...`);
     const raw     = await get(url);
@@ -632,15 +693,17 @@ async function sendTelegram(message) {
 async function main() {
     log('=== Morning Report starting ===');
     try {
-        const [weather, gasPrice, agenda, canada, ottawa, world, tech, business, guardian, commute, anomalies] = await Promise.all([
+        const [weather, gasPrice, agenda, canada, ottawa, world, tech, ai, business, markets, guardian, commute, anomalies] = await Promise.all([
             fetchWeatherV2(),
             fetchOttawaGasPrice(),
             fetchTodayAgenda(),
-            fetchGNews('Canada News',  `https://gnews.io/api/v4/top-headlines?category=general&country=ca&lang=en&max=5&apikey=${GNEWS_KEY}`),
-            fetchGNews('Ottawa News',  `https://gnews.io/api/v4/search?q=Ottawa&lang=en&max=5&apikey=${GNEWS_KEY}`),
-            fetchGNews('World News',   `https://gnews.io/api/v4/top-headlines?category=world&lang=en&max=5&apikey=${GNEWS_KEY}`),
-            fetchGNews('Tech News',    `https://gnews.io/api/v4/top-headlines?category=technology&lang=en&max=5&apikey=${GNEWS_KEY}`),
-            fetchGNews('Business News', `https://gnews.io/api/v4/top-headlines?category=business&lang=en&max=5&apikey=${GNEWS_KEY}`),
+            fetchRSS('Canada News',   'https://www.cbc.ca/webfeed/rss/rss-topstories'),
+            fetchRSS('Ottawa News',   'https://www.cbc.ca/webfeed/rss/rss-canada-ottawa'),
+            fetchRSS('World News',    'https://feeds.bbci.co.uk/news/world/rss.xml'),
+            fetchRSS('Tech News',     'https://feeds.arstechnica.com/arstechnica/technology-lab'),
+            fetchRSS('AI News',       'https://techcrunch.com/category/artificial-intelligence/feed/'),
+            fetchRSS('Business News', 'https://www.cbc.ca/webfeed/rss/rss-business'),
+            fetchMarkets(),
             fetchGuardian(),
             fetchSchoolCommute(),
             fetchHouseholdAnomalies(),
@@ -655,7 +718,7 @@ async function main() {
         }).format(new Date());
         const todayLine = `Today: ${dateHeader}`;
 
-        const sections = [todayLine, weather, gasPrice, commute, anomalies, agenda, canada, ottawa, world, tech, business, guardian].filter(Boolean);
+        const sections = [todayLine, weather, gasPrice, commute, anomalies, agenda, canada, ottawa, world, tech, ai, business, markets, guardian].filter(Boolean);
         const combined = sections.join('\n\n');
 
         // Fetch 14-day feedback preferences and inject into system prompt
