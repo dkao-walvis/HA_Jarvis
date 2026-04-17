@@ -36,8 +36,14 @@ RECONNECT_DELAY  = 10   # seconds between reconnect attempts
 LOG_LEVEL        = logging.INFO
 ROUTINE_COOLDOWN = 300  # seconds — minimum gap between same routine firing (5 min)
 
+KITCHEN_RESUME_DEBOUNCE  = 30   # seconds speaker must stay idle before resume fires
+KITCHEN_RESUME_COOLDOWN  = 180  # seconds between consecutive resume fires
+
 # Cooldown tracker: routine_key → last fired timestamp
 _last_fired: dict[str, float] = {}
+
+# Kitchen dinner-music auto-resume state
+_kitchen_resume_task: asyncio.Task | None = None
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 
@@ -214,6 +220,23 @@ async def listen(ha_token: str, db_pass: str) -> None:  # noqa: C901
                 # if entity_id.startswith("input_boolean.") and any(k in entity_id.lower() for k in ("dk_in_office", "dk_working", "dk_office", "dkinoffice")):
                 #     pass  # old office_routine code removed
 
+                # ── Kitchen dinner-music auto-resume ──────────────────────────────
+                # When kitchen speaker goes playing → idle/off during dinner, restart
+                # dinner music after a 30s debounce. Handles TTS/dinner-bell interrupts
+                # that don't auto-resume.
+                if entity_id == "media_player.kitchen_speaker":
+                    global _kitchen_resume_task
+                    if state in ("idle", "off") and old_state_val == "playing":
+                        if _kitchen_resume_task and not _kitchen_resume_task.done():
+                            _kitchen_resume_task.cancel()
+                        _kitchen_resume_task = asyncio.create_task(
+                            _maybe_resume_kitchen_music(ha_token, db_pass)
+                        )
+                    elif state == "playing":
+                        if _kitchen_resume_task and not _kitchen_resume_task.done():
+                            _kitchen_resume_task.cancel()
+                            _kitchen_resume_task = None
+
                 # ── Dinner routine: dinner time entity on/off ─────────────────────
                 if "dinner" in entity_id.lower():
                     if old_state_val in ("off", "unavailable") and state == "on":
@@ -237,6 +260,47 @@ async def listen(ha_token: str, db_pass: str) -> None:  # noqa: C901
 
     finally:
         conn.close()
+
+
+async def _maybe_resume_kitchen_music(ha_token: str, db_pass: str) -> None:
+    """Debounce → verify dinner still active + speaker still idle → fire resume.
+
+    Cancelled by a speaker=playing event (song between songs, or the resume itself
+    took hold), so only fires when kitchen stays idle for KITCHEN_RESUME_DEBOUNCE.
+    """
+    try:
+        await asyncio.sleep(KITCHEN_RESUME_DEBOUNCE)
+    except asyncio.CancelledError:
+        return
+
+    # Local cooldown so we don't hammer run_music_routine on a flappy speaker
+    if time.time() - _last_fired.get("kitchen_resume", 0) < KITCHEN_RESUME_COOLDOWN:
+        log.info("Kitchen resume skipped (cooldown)")
+        return
+
+    # Re-check via HA REST so we don't race the cache
+    headers = {"Authorization": f"Bearer {ha_token}"}
+    try:
+        dinner = requests.get(f"{HA_URL}/api/states/binary_sensor.dinner_time",
+                              headers=headers, timeout=5).json()
+        speaker = requests.get(f"{HA_URL}/api/states/media_player.kitchen_speaker",
+                               headers=headers, timeout=5).json()
+    except Exception as e:
+        log.warning(f"Kitchen resume state fetch failed: {e}")
+        return
+
+    if dinner.get("state") != "on":
+        log.info("Kitchen resume skipped — dinner_time not on")
+        return
+    if speaker.get("state") not in ("idle", "off"):
+        log.info(f"Kitchen resume skipped — speaker is {speaker.get('state')}")
+        return
+
+    _last_fired["kitchen_resume"] = time.time()
+    log.info("Kitchen speaker idle 30s during dinner — resuming music")
+    asyncio.get_event_loop().run_in_executor(
+        None, dinner_routine.on_dinner_start, db_pass
+    )
 
 
 async def seed_cache(ws, conn: pymysql.Connection) -> None:
