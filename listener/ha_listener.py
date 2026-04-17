@@ -241,11 +241,15 @@ async def listen(ha_token: str, db_pass: str) -> None:  # noqa: C901
                 if "dinner" in entity_id.lower():
                     if old_state_val in ("off", "unavailable") and state == "on":
                         if time.time() - _last_fired.get("dinner_start", 0) >= ROUTINE_COOLDOWN:
-                            _last_fired["dinner_start"] = time.time()
-                            log.info(f"Dinner time ON ({entity_id}) — triggering dinner routine")
-                            asyncio.get_event_loop().run_in_executor(
-                                None, dinner_routine.on_dinner_start, db_pass
-                            )
+                            # House-empty guard: no dinner music if nobody's home
+                            if _zone_home_count(ha_token) == 0:
+                                log.info(f"Dinner time ON ({entity_id}) — house empty, skipping music")
+                            else:
+                                _last_fired["dinner_start"] = time.time()
+                                log.info(f"Dinner time ON ({entity_id}) — triggering dinner routine")
+                                asyncio.get_event_loop().run_in_executor(
+                                    None, dinner_routine.on_dinner_start, db_pass
+                                )
                         else:
                             log.info(f"Dinner time ON ({entity_id}) — skipped (cooldown)")
                     elif old_state_val == "on" and state == "off":
@@ -260,6 +264,22 @@ async def listen(ha_token: str, db_pass: str) -> None:  # noqa: C901
 
     finally:
         conn.close()
+
+
+def _zone_home_count(ha_token: str) -> int:
+    """Return zone.home person count. Defaults to -1 on error so callers
+    can distinguish 'nobody home' (0) from 'HA unreachable' (-1) if needed.
+    """
+    try:
+        r = requests.get(
+            f"{HA_URL}/api/states/zone.home",
+            headers={"Authorization": f"Bearer {ha_token}"},
+            timeout=5,
+        )
+        return int(r.json().get("state", 0))
+    except Exception as e:
+        log.warning(f"zone.home fetch failed, defaulting to 1 (fail-open): {e}")
+        return 1  # fail-open: don't silence dinner routine on HA glitch
 
 
 async def _maybe_resume_kitchen_music(ha_token: str, db_pass: str) -> None:
