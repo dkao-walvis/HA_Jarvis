@@ -77,6 +77,13 @@ def get_db(db_pass: str) -> pymysql.Connection:
         cursorclass=pymysql.cursors.DictCursor
     )
 
+def get_brain_db(db_pass: str) -> pymysql.Connection:
+    return pymysql.connect(
+        host=DB_HOST, db="jarvis_brain", user=DB_USER, password=db_pass,
+        charset="utf8mb4", autocommit=True,
+        cursorclass=pymysql.cursors.DictCursor
+    )
+
 def ensure_cache_table(conn: pymysql.Connection) -> None:
     with conn.cursor() as cur:
         cur.execute("""
@@ -124,6 +131,69 @@ def upsert_state(conn: pymysql.Connection, entity_id: str, state: str,
                 cached_at    = NOW()
         """, (entity_id, state, json.dumps(attributes), last_changed[:19] if last_changed else None))
 
+# ── Automation fire log ───────────────────────────────────────────────────────
+
+# Module-level cache: automation entity_id (automation.foo) -> automation_id (HA config id)
+_automation_id_by_entity: dict[str, str] = {}
+
+# Entities that go into every fire's context_json snapshot. Pulled from the
+# jarvis_ha.entity_cache rather than held in a separate in-memory cache.
+_CONTEXT_ENTITIES = [
+    "zone.home",
+    "person.darren", "person.sk", "person.ek", "person.josie",
+    "input_boolean.good_night_mode",
+    "alarm_control_panel.simpson_alarm",
+    "binary_sensor.dinner_time",
+    "input_boolean.school_on",
+]
+
+def _refresh_automation_id_map(brain_conn) -> None:
+    """Rebuild the automation_entity -> automation_id map from ha_automations."""
+    global _automation_id_by_entity
+    with brain_conn.cursor() as cur:
+        cur.execute("SELECT automation_id, entity_id FROM ha_automations WHERE deleted_at IS NULL")
+        _automation_id_by_entity = {r["entity_id"]: r["automation_id"] for r in cur.fetchall()}
+
+def _context_snapshot(ha_conn) -> dict:
+    """Build the context_json payload by reading entity_cache for the few entities we care about."""
+    placeholders = ",".join(["%s"] * len(_CONTEXT_ENTITIES))
+    with ha_conn.cursor() as cur:
+        cur.execute(f"SELECT entity_id, state FROM entity_cache WHERE entity_id IN ({placeholders})",
+                    _CONTEXT_ENTITIES)
+        states = {r["entity_id"]: r["state"] for r in cur.fetchall()}
+    now = datetime.now()
+    def to_int(v):
+        try: return int(v)
+        except (TypeError, ValueError): return None
+    persons = {"darren":"person.darren","sk":"person.sk","ek":"person.ek","josie":"person.josie"}
+    return {
+        "zone_home":        to_int(states.get("zone.home")),
+        "persons":          {k: states.get(v) for k,v in persons.items()},
+        "good_night_mode":  states.get("input_boolean.good_night_mode") == "on",
+        "alarm_state":      states.get("alarm_control_panel.simpson_alarm"),
+        "time_of_day":      now.strftime("%H:%M"),
+        "dow":              now.isoweekday(),
+        "dinner_time_on":   states.get("binary_sensor.dinner_time") == "on",
+        "school_on":        states.get("input_boolean.school_on") == "on",
+    }
+
+def _write_fire(brain_conn, ha_conn, entity_id: str, trigger_info: dict) -> None:
+    """Write one automation_fires row. No-op if the automation isn't in our catalog yet."""
+    aid = _automation_id_by_entity.get(entity_id)
+    if not aid:
+        log.debug(f"Fire for unknown automation {entity_id} — catalog may need resync")
+        return
+    ctx = _context_snapshot(ha_conn)
+    trigger_value = (str(trigger_info.get("from_state") or "") + "→" +
+                     str(trigger_info.get("to_state") or "")).strip("→")
+    if trigger_value == "":
+        trigger_value = None
+    with brain_conn.cursor() as cur:
+        cur.execute("""INSERT INTO automation_fires
+            (automation_id, fired_at, source, trigger_entity, trigger_value, context_json)
+            VALUES (%s, NOW(3), 'ha', %s, %s, %s)""",
+            (aid, trigger_info.get("entity_id"), trigger_value, json.dumps(ctx, default=str)))
+
 # ── WebSocket listener ────────────────────────────────────────────────────────
 
 async def listen(ha_token: str, db_pass: str) -> None:  # noqa: C901
@@ -150,12 +220,24 @@ async def listen(ha_token: str, db_pass: str) -> None:  # noqa: C901
             assert msg.get("success"), f"Subscribe failed: {msg}"
             log.info("Subscribed to state_changed events")
 
+            # Subscribe to automation_triggered for the fire log
+            await ws.send(json.dumps({"id": 10, "type": "subscribe_events",
+                                      "event_type": "automation_triggered"}))
+            msg = json.loads(await ws.recv())
+            assert msg.get("success"), f"automation_triggered subscribe failed: {msg}"
+            log.info("Subscribed to automation_triggered events")
+
+            brain_conn = get_brain_db(db_pass)
+            _refresh_automation_id_map(brain_conn)
+            log.info(f"Loaded {len(_automation_id_by_entity)} automation ids into fire-map")
+            _last_map_refresh = time.time()
+
             # Step 3 — seed cache with current states of whitelisted entities
             await seed_cache(ws, conn)
 
             # Step 4 — process incoming events
             log.info("Listening for state changes...")
-            msg_id = 10
+            msg_id = 20
 
             while True:
                 try:
@@ -169,7 +251,29 @@ async def listen(ha_token: str, db_pass: str) -> None:  # noqa: C901
                     continue
 
                 event = msg.get("event", {})
-                if event.get("event_type") != "state_changed":
+
+                # Route automation_triggered events to the fire-log writer
+                ev_type = event.get("event_type")
+                if ev_type == "automation_triggered":
+                    # Periodic refresh of automation-id map (every 30 min)
+                    if time.time() - _last_map_refresh > 1800:
+                        _refresh_automation_id_map(brain_conn)
+                        _last_map_refresh = time.time()
+                    data = event.get("data", {})
+                    auto_entity = data.get("entity_id", "")
+                    trig_payload = (data.get("variables") or {}).get("trigger") or {}
+                    trigger_info = {
+                        "entity_id":  trig_payload.get("entity_id"),
+                        "from_state": (trig_payload.get("from_state") or {}).get("state", ""),
+                        "to_state":   (trig_payload.get("to_state")   or {}).get("state", ""),
+                    }
+                    try:
+                        _write_fire(brain_conn, conn, auto_entity, trigger_info)
+                    except Exception as e:
+                        log.warning(f"Fire write failed for {auto_entity}: {e}")
+                    continue
+
+                if ev_type != "state_changed":
                     continue
 
                 data      = event.get("data", {})
