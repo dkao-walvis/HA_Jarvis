@@ -136,6 +136,9 @@ def upsert_state(conn: pymysql.Connection, entity_id: str, state: str,
 # Module-level cache: automation entity_id (automation.foo) -> automation_id (HA config id)
 _automation_id_by_entity: dict[str, str] = {}
 
+# Module-level set of ignored automation_ids (from automation_ignored table).
+_ignored_automation_ids: set[str] = set()
+
 # Entities that go into every fire's context_json snapshot. Pulled from the
 # jarvis_ha.entity_cache rather than held in a separate in-memory cache.
 _CONTEXT_ENTITIES = [
@@ -148,11 +151,14 @@ _CONTEXT_ENTITIES = [
 ]
 
 def _refresh_automation_id_map(brain_conn) -> None:
-    """Rebuild the automation_entity -> automation_id map from ha_automations."""
-    global _automation_id_by_entity
+    """Rebuild the automation_entity -> automation_id map from ha_automations
+    and refresh the ignore set from automation_ignored."""
+    global _automation_id_by_entity, _ignored_automation_ids
     with brain_conn.cursor() as cur:
         cur.execute("SELECT automation_id, entity_id FROM ha_automations WHERE deleted_at IS NULL")
         _automation_id_by_entity = {r["entity_id"]: r["automation_id"] for r in cur.fetchall()}
+        cur.execute("SELECT automation_id FROM automation_ignored")
+        _ignored_automation_ids = {r["automation_id"] for r in cur.fetchall()}
 
 def _context_snapshot(ha_conn) -> dict:
     """Build the context_json payload by reading entity_cache for the few entities we care about."""
@@ -178,11 +184,14 @@ def _context_snapshot(ha_conn) -> dict:
     }
 
 def _write_fire(brain_conn, ha_conn, entity_id: str, trigger_info: dict) -> None:
-    """Write one automation_fires row. No-op if the automation isn't in our catalog yet."""
+    """Write one automation_fires row. No-op if the automation isn't in our catalog yet
+    or is on the explicit ignore list."""
     aid = _automation_id_by_entity.get(entity_id)
     if not aid:
         log.debug(f"Fire for unknown automation {entity_id} — catalog may need resync")
         return
+    if aid in _ignored_automation_ids:
+        return  # explicit ignore list — don't log
     ctx = _context_snapshot(ha_conn)
     trigger_value = (str(trigger_info.get("from_state") or "") + "→" +
                      str(trigger_info.get("to_state") or "")).strip("→")
