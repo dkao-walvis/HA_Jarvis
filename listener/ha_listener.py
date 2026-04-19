@@ -333,6 +333,23 @@ async def listen(ha_token: str, db_pass: str) -> None:  # noqa: C901
                 # if entity_id.startswith("input_boolean.") and any(k in entity_id.lower() for k in ("dk_in_office", "dk_working", "dk_office", "dkinoffice")):
                 #     pass  # old office_routine code removed
 
+                # ── Empty-house → stop dinner music mid-track ─────────────────────
+                # zone.home counts present persons. When it drops to 0 while
+                # kitchen_speaker is playing dinner music, stop immediately —
+                # don't wait for the next song boundary for the auto-resume
+                # guard above to catch it.
+                if entity_id == "zone.home":
+                    try:
+                        prev_cnt = int(old_state_val) if old_state_val and old_state_val.isdigit() else -1
+                        new_cnt  = int(state) if state and state.isdigit() else -1
+                    except Exception:
+                        prev_cnt = new_cnt = -1
+                    if prev_cnt > 0 and new_cnt == 0:
+                        log.info("zone.home → 0; stopping kitchen dinner music if playing")
+                        asyncio.get_event_loop().run_in_executor(
+                            None, dinner_routine.on_dinner_end, db_pass
+                        )
+
                 # ── Kitchen dinner-music auto-resume ──────────────────────────────
                 # When kitchen speaker goes playing → idle/off during dinner, restart
                 # dinner music after a 30s debounce. Handles TTS/dinner-bell interrupts
@@ -424,6 +441,11 @@ async def _maybe_resume_kitchen_music(ha_token: str, db_pass: str) -> None:
 
     if dinner.get("state") != "on":
         log.info("Kitchen resume skipped — dinner_time not on")
+        return
+    if _zone_home_count(ha_token) == 0:
+        # Mirror the start-path guard — dinner_time is time-based and doesn't
+        # track presence, so we re-verify here before every auto-resume.
+        log.info("Kitchen resume skipped — house empty")
         return
     if speaker.get("state") not in ("idle", "off"):
         log.info(f"Kitchen resume skipped — speaker is {speaker.get('state')}")
