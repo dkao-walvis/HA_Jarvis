@@ -32,6 +32,7 @@ if (!$stmt->fetch()) {
 // ── Parse body ───────────────────────────────────────────────────────────────
 $body       = json_decode(file_get_contents('php://input'), true) ?: [];
 $preference = trim($body['preference'] ?? '');   // v1: logged only, not wired
+$speaker_override = trim($body['speaker'] ?? '');
 
 // ── Connect to jarvis_brain ──────────────────────────────────────────────────
 $brainDb = new PDO(
@@ -40,9 +41,14 @@ $brainDb = new PDO(
 );
 $brainDb->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
 
-$context  = 'office';
-$speaker  = 'Darren office speaker';
-$fallback = 'instrumental focus work playlist';
+$speaker_map = [
+    'kitchen' => ['context' => 'kitchen', 'speaker' => 'Kitchen speaker',      'fallback' => 'pleasant kitchen background music'],
+    'office'  => ['context' => 'office',  'speaker' => 'Darren office speaker', 'fallback' => 'instrumental focus work playlist'],
+];
+$room     = isset($speaker_map[$speaker_override]) ? $speaker_override : 'office';
+$context  = $speaker_map[$room]['context'];
+$speaker  = $speaker_map[$room]['speaker'];
+$fallback = $speaker_map[$room]['fallback'];
 
 // ── Fetch enabled seeds ──────────────────────────────────────────────────────
 $seedStmt = $brainDb->prepare("SELECT * FROM music_seeds WHERE context = ? AND enabled = 1");
