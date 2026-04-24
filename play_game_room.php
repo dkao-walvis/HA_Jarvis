@@ -29,6 +29,12 @@ if (!$stmt->fetch()) {
     exit;
 }
 
+// ── Cleaning day guard ───────────────────────────────────────────────────────
+if (file_exists('/tmp/cleaning_day_active')) {
+    echo json_encode(['ok' => true, 'skipped' => true, 'reason' => 'cleaning day active']);
+    exit;
+}
+
 // ── Parse body ───────────────────────────────────────────────────────────────
 $body       = json_decode(file_get_contents('php://input'), true) ?: [];
 $preference = trim($body['preference'] ?? '');   // v1: logged only, not wired
