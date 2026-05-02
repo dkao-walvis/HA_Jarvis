@@ -678,11 +678,19 @@ async function askClaude(content, system) {
 }
 
 // ── Send Telegram ─────────────────────────────────────────────────────────────
+// Escape chars Telegram's legacy Markdown parser treats as entity starters.
+// We keep `*` because the briefing uses *...* for the title bold; escape the
+// rest so identifiers like "LOG_ONLY", bracket-wrapped notes, or stray
+// backticks don't open an entity that never closes.
+function escapeTelegramMarkdown(s) {
+    return s.replace(/([_`\[\]])/g, '\\$1');
+}
+
 async function sendTelegram(message) {
     log(`Sending Telegram to ${TELEGRAM_CHAT_ID}...`);
     const result = await post(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`, {
         chat_id: TELEGRAM_CHAT_ID,
-        text:    message,
+        text:    escapeTelegramMarkdown(message),
         parse_mode: 'Markdown',
     });
     log(`Telegram result: ${result}`);
